@@ -1,4 +1,5 @@
 # IRMSGen
+<<<<<<< HEAD
 
 IRMSGen is a metadata-first microservice generator for .NET 8 and PostgreSQL.
 
@@ -23,3 +24,6 @@ dotnet run --project src/IRMSGen.App
 ```bash
 dotnet run --project src/IRMSGen.Cli -- generate --input samples/order-service.json --output generated
 ```
+=======
+Generate Mocroservice
+>>>>>>> 6b44968bcf7c0a2e7db9bb81efa1fee5839f10e8
