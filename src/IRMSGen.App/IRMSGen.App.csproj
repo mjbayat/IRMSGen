@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="Components\Shared\**" />
+    <Compile Remove="Components\Wizard\**" />
+    <Content Remove="Components\Shared\**" />
+    <Content Remove="Components\Wizard\**" />
+    <EmbeddedResource Remove="Components\Shared\**" />
+    <EmbeddedResource Remove="Components\Wizard\**" />
+    <None Remove="Components\Shared\**" />
+    <None Remove="Components\Wizard\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\IRMSGen.Application\IRMSGen.Application.csproj" />
+    <ProjectReference Include="..\IRMSGen.Contracts\IRMSGen.Contracts.csproj" />
+    <ProjectReference Include="..\IRMSGen.Domain\IRMSGen.Domain.csproj" />
+    <ProjectReference Include="..\IRMSGen.Generator\IRMSGen.Generator.csproj" />
+    <ProjectReference Include="..\IRMSGen.Infrastructure\IRMSGen.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

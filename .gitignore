@@ -1,0 +1,28 @@
+bin/
+obj/
+.vs/
+.vscode/
+.idea/
+.DS_Store
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Local runtime settings and secrets
+**/appsettings.Development.json
+**/appsettings.Local.json
+.env
+.env.*
+!.env.example
+
+# Generated service outputs and scratch files
+generated/
+tmp/
+
+# Test and coverage outputs
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
+

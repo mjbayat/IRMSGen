@@ -1,0 +1,17 @@
+{
+  "serviceName": "OrderService",
+  "targetFramework": "net8.0",
+  "database": "postgresql",
+  "entities": [
+    {
+      "name": "Order",
+      "generateCrud": true,
+      "fields": [
+        { "name": "Id", "type": "Guid", "required": true },
+        { "name": "CustomerName", "type": "string", "required": true },
+        { "name": "TotalAmount", "type": "decimal", "required": true },
+        { "name": "CreatedAt", "type": "DateTime", "required": true }
+      ]
+    }
+  ]
+}

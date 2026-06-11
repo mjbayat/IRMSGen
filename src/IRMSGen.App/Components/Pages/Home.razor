@@ -1,0 +1,2410 @@
+@page "/"
+@using IRMSGen.Infrastructure.Persistence
+@inject PlatformWorkspaceStore WorkspaceStore
+@inject VisualGenerationService GenerationService
+@inject IJSRuntime JS
+
+<PageTitle>IRMSGen | Microservice Generator</PageTitle>
+
+<section class="mg-shell @ThemeClass @DirectionClass" dir="@LayoutDirection">
+    <aside class="mg-sidebar">
+        <div class="mg-logo">
+            <div class="mg-logo-icon">IR</div>
+            <span>IRMSGen</span>
+        </div>
+
+        <nav class="mg-nav">
+            <div class="mg-nav-section">فضای کار</div>
+            <button class="mg-nav-item @(ActiveScreen == Screen.Dashboard ? "on" : "")" @onclick="() => Go(Screen.Dashboard)">
+                <span>▦</span>
+                داشبورد
+            </button>
+            <button class="mg-nav-item @(ActiveScreen == Screen.Wizard ? "on" : "")" @onclick="() => Go(Screen.Wizard)">
+                <span>＋</span>
+                سرویس جدید
+                <small>Wizard</small>
+            </button>
+
+            <div class="mg-nav-section">منابع</div>
+            <button class="mg-nav-item @(ActiveScreen == Screen.Connectors ? "on" : "")" @onclick="() => Go(Screen.Connectors)">
+                <span>⌁</span>
+                Connector‌ها
+            </button>
+            <button class="mg-nav-item">
+                <span>▧</span>
+                Template‌ها
+            </button>
+            <button class="mg-nav-item">
+                <span>□</span>
+                پروژه‌ها
+            </button>
+        </nav>
+
+        <nav class="mg-nav mg-nav-bottom">
+            <button class="mg-nav-item @(ActiveScreen == Screen.Settings ? "on" : "")" @onclick="() => Go(Screen.Settings)">
+                <span>⚙</span>
+                تنظیمات
+            </button>
+            <button class="mg-nav-item">
+                <span>◉</span>
+                حساب کاربری
+            </button>
+        </nav>
+    </aside>
+
+    <main class="mg-main">
+        <header class="mg-topbar">
+            <strong>@Title</strong>
+            <div class="mg-topbar-actions">
+                <button class="mg-btn" @onclick="ToggleThemeAsync">@ThemeToggleText</button>
+                <button class="mg-btn" @onclick="ToggleDirectionAsync">@DirectionToggleText</button>
+                <button class="mg-btn" @onclick="() => Go(Screen.Connectors)">کانکتورها</button>
+                <button class="mg-btn mg-btn-primary" @onclick="StartNewService">سرویس جدید</button>
+            </div>
+        </header>
+
+        <section class="mg-content">
+            @if (!string.IsNullOrWhiteSpace(PlatformMessage))
+            {
+                <div class="mg-platform-message">@PlatformMessage</div>
+            }
+
+            @switch (ActiveScreen)
+            {
+                case Screen.Dashboard:
+                    @Dashboard()
+                    break;
+                case Screen.Wizard:
+                    @Wizard()
+                    break;
+                case Screen.Connectors:
+                    @ConnectorScreen()
+                    break;
+                case Screen.Settings:
+                    @SettingsScreen()
+                    break;
+            }
+        </section>
+    </main>
+</section>
+
+@code {
+    private Screen ActiveScreen { get; set; } = Screen.Dashboard;
+    private int CurrentWizardStep { get; set; }
+    private bool GenerationFinished { get; set; }
+    private bool IsGenerating { get; set; }
+    private string SelectedSourceType { get; set; } = "موجودیت جدید";
+    private string SelectedArchitecture { get; set; } = "Clean Architecture";
+    private string ThemeMode { get; set; } = "dark";
+    private string LayoutDirection { get; set; } = "rtl";
+    private Guid? CurrentProjectId { get; set; }
+    private string? PlatformMessage { get; set; }
+    private IReadOnlyList<string> StepServiceErrors { get; set; } = [];
+    private string? GeneratedOutputPath { get; set; }
+    private IReadOnlyList<string> GenerationErrors { get; set; } = [];
+    private WizardState CurrentState { get; set; } = WizardStateFactory.CreateDefault();
+    private bool NewMethodUsesPaging { get; set; }
+    private bool NewMethodUsesExternalService { get; set; }
+    private bool NewMethodUsesCache { get; set; }
+    private bool NewMethodUsesMessageLog { get; set; }
+    private bool NewMethodUsesEncryption { get; set; }
+    private int EntityDesignerStep { get; set; }
+    private HashSet<string> SelectedInfrastructureConnectors => CurrentState.InfrastructureConnectors;
+    private ConnectorCredentialDefinition NewCredential { get; set; } = CreateEmptyCredential();
+    private string? EditingCredentialId { get; set; }
+    private bool IsCredentialModalOpen { get; set; }
+    private IReadOnlyList<ConnectorCredentialDefinition> DatabaseCredentials =>
+        CurrentState.ConnectorCredentials
+            .Where(credential => credential.ConnectorType is "PostgreSQL" or "MS SQL")
+            .ToList();
+    private ConnectorCredentialDefinition? SelectedDatabaseCredential =>
+        CurrentState.ConnectorCredentials.FirstOrDefault(credential => credential.Id == CurrentState.DatabaseConnection.CredentialId);
+
+    private static IReadOnlyList<ConnectorDefinition> ConnectorCatalog { get; } =
+    [
+        new("PostgreSQL", "PostgreSQL database", "fa-solid fa-database", "تنظیم اتصال PostgreSQL با SSL و SSH Tunnel"),
+        new("MS SQL", "MS SQL database", "fa-solid fa-server", "تنظیم اتصال SQL Server با TDS و TLS"),
+        new("Redis", "Redis cache", "fa-solid fa-memory", "تنظیم اتصال Redis با SSL و Database Number"),
+        new("RabbitMQ", "RabbitMQ broker", "fa-solid fa-diagram-project", "تنظیم اتصال RabbitMQ با Vhost و SSL Certificate"),
+        new("ELK", "ELK / Elasticsearch", "fa-solid fa-chart-line", "تنظیم اتصال Elasticsearch/ELK برای لاگ و جستجو")
+    ];
+
+    private List<ProjectCard> Projects { get; set; } =
+    [
+        new(Guid.Empty, "OrderService", "Clean Architecture · PostgreSQL · RabbitMQ · ۳ روز پیش", "▣", "ok"),
+        new(Guid.Empty, "CustomerService", "Clean Architecture · PostgreSQL · Redis · دیروز", "◉", "ok"),
+        new(Guid.Empty, "PaymentService", "DDD · External API · ELK · آماده تولید", "◇", "warn")
+    ];
+
+    private string Title => ActiveScreen switch
+    {
+        Screen.Dashboard => "داشبورد",
+        Screen.Wizard => "سرویس جدید",
+        Screen.Connectors => "Connector‌ها",
+        Screen.Settings => "تنظیمات",
+        _ => "IRMSGen"
+    };
+
+    private string ThemeClass => ThemeMode == "light" ? "mg-light" : "mg-dark";
+
+    private string ThemeToggleText => ThemeMode == "light" ? "Dark mode" : "Light mode";
+
+    private string DirectionClass => LayoutDirection == "ltr" ? "mg-dir-ltr" : "mg-dir-rtl";
+
+    private string DirectionToggleText => LayoutDirection == "ltr" ? "RTL" : "LTR";
+
+    private async Task SetThemeAsync(string theme)
+    {
+        ThemeMode = theme == "light" ? "light" : "dark";
+        try
+        {
+            await JS.InvokeVoidAsync("localStorage.setItem", "irmsgen.theme", ThemeMode);
+        }
+        catch
+        {
+            // Theme still applies for the current session if browser storage is unavailable.
+        }
+    }
+
+    private Task ToggleThemeAsync() => SetThemeAsync(ThemeMode == "light" ? "dark" : "light");
+
+    private async Task SetDirectionAsync(string direction)
+    {
+        LayoutDirection = direction == "ltr" ? "ltr" : "rtl";
+        try
+        {
+            await JS.InvokeVoidAsync("localStorage.setItem", "irmsgen.direction", LayoutDirection);
+        }
+        catch
+        {
+            // Direction still applies for the current session if browser storage is unavailable.
+        }
+    }
+
+    private Task ToggleDirectionAsync() => SetDirectionAsync(LayoutDirection == "ltr" ? "rtl" : "ltr");
+
+    private IReadOnlyList<string> WizardSteps =>
+    [
+        "سرویس",
+        "معماری",
+        "دیتابیس",
+        "موجودیت",
+        "API خارجی",
+        "قوانین",
+        "تولید"
+    ];
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadPlatformStateAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        try
+        {
+            var storedTheme = await JS.InvokeAsync<string?>("localStorage.getItem", "irmsgen.theme");
+            if (storedTheme is "light" or "dark" && storedTheme != ThemeMode)
+            {
+                ThemeMode = storedTheme;
+            }
+
+            var storedDirection = await JS.InvokeAsync<string?>("localStorage.getItem", "irmsgen.direction");
+            if (storedDirection is "rtl" or "ltr" && storedDirection != LayoutDirection)
+            {
+                LayoutDirection = storedDirection;
+            }
+
+            await InvokeAsync(StateHasChanged);
+        }
+        catch
+        {
+            // Local storage is optional; default dark mode remains available.
+        }
+    }
+
+    private async Task LoadPlatformStateAsync()
+    {
+        try
+        {
+            var projects = await WorkspaceStore.GetProjectsAsync();
+            if (projects.Count > 0)
+            {
+                Projects = projects
+                    .Select(project => new ProjectCard(
+                        project.Id,
+                        project.Name,
+                        $"{project.Architecture} · PostgreSQL · {RelativeTime(project.UpdatedAt)}",
+                        "▣",
+                        project.Status == "Draft" ? "warn" : "ok"))
+                    .ToList();
+            }
+
+            PlatformMessage = null;
+        }
+        catch
+        {
+            PlatformMessage = "پلتفرم در حالت آفلاین اجرا می‌شود؛ تا زمان اتصال دیتابیس، داده‌های نمایشی نمایش داده می‌شوند.";
+        }
+    }
+
+    private void Go(Screen screen)
+    {
+        ActiveScreen = screen;
+    }
+
+    private async Task StartNewService()
+    {
+        CurrentWizardStep = 0;
+        GenerationFinished = false;
+        StepServiceErrors = [];
+        CurrentState = WizardStateFactory.CreateDefault();
+        CurrentState.InfrastructureConnectors = ["PostgreSQL"];
+        NewCredential = CreateEmptyCredential();
+        CurrentProjectId = await SaveDraftAsync("Draft service started.");
+        ActiveScreen = Screen.Wizard;
+    }
+
+    private async Task SetWizardStep(int step)
+    {
+        if (CurrentWizardStep == 0 && step > 0 && !ValidateServiceStep())
+        {
+            return;
+        }
+
+        if (step == 6)
+        {
+            await GenerateFromInputAsync();
+            return;
+        }
+
+        CurrentWizardStep = step;
+        CurrentState.CurrentStep = StepToWizardStep(step);
+        CurrentProjectId = await SaveDraftAsync($"Wizard moved to step {step + 1}.");
+    }
+
+    private async Task NextStep()
+    {
+        if (CurrentWizardStep == 0 && !ValidateServiceStep())
+        {
+            return;
+        }
+
+        if (CurrentWizardStep == 5)
+        {
+            await GenerateFromInputAsync();
+            return;
+        }
+
+        await SetWizardStep(Math.Min(CurrentWizardStep + 1, WizardSteps.Count - 1));
+    }
+
+    private bool ValidateServiceStep()
+    {
+        var errors = new List<string>();
+        if (string.IsNullOrWhiteSpace(CurrentState.Project.Category))
+        {
+            errors.Add("دسته‌بندی الزامی است.");
+        }
+
+        if (string.IsNullOrWhiteSpace(CurrentState.Project.ServiceName))
+        {
+            errors.Add("نام سرویس الزامی است.");
+        }
+
+        if (string.IsNullOrWhiteSpace(CurrentState.Project.Description))
+        {
+            errors.Add("توضیح سرویس الزامی است.");
+        }
+
+        StepServiceErrors = errors;
+        return errors.Count == 0;
+    }
+
+    private string RequiredClass(string? value) =>
+        StepServiceErrors.Count > 0 && string.IsNullOrWhiteSpace(value) ? "invalid" : string.Empty;
+
+    private Task PreviousStep() => SetWizardStep(Math.Max(CurrentWizardStep - 1, 0));
+
+    private async Task SelectArchitecture(string architecture)
+    {
+        SelectedArchitecture = architecture;
+        CurrentProjectId = await SaveDraftAsync($"Architecture selected: {architecture}.");
+    }
+
+    private void SelectSourceType(string sourceType)
+    {
+        SelectedSourceType = sourceType;
+        CurrentEntity.Kind = sourceType switch
+        {
+            "Stored Proc" => "StoredProcedure",
+            "Custom Query" => "Query",
+            "جدول موجود" => "Table",
+            _ => "Entity"
+        };
+    }
+
+    private async Task SelectSourceTypeAsync(string sourceType)
+    {
+        SelectSourceType(sourceType);
+        CurrentProjectId = await SaveDraftAsync($"Entity source type selected: {sourceType}.");
+    }
+
+    private Task OnSourceTypeChangedAsync(ChangeEventArgs eventArgs) =>
+        SelectSourceTypeAsync(eventArgs.Value?.ToString() ?? "موجودیت جدید");
+
+    private async Task ToggleInfrastructureConnectorAsync(string connector)
+    {
+        if (SelectedInfrastructureConnectors.Contains(connector))
+        {
+            if (connector == "PostgreSQL")
+            {
+                PlatformMessage = "PostgreSQL برای خروجی فعلی اجباری است و نمی‌تواند غیرفعال شود.";
+                return;
+            }
+
+            SelectedInfrastructureConnectors.Remove(connector);
+            CurrentProjectId = await SaveDraftAsync($"Infrastructure connector disabled: {connector}.");
+            return;
+        }
+
+        SelectedInfrastructureConnectors.Add(connector);
+        CurrentProjectId = await SaveDraftAsync($"Infrastructure connector enabled: {connector}.");
+    }
+
+    private async Task AddCredentialAsync()
+    {
+        if (string.IsNullOrWhiteSpace(NewCredential.Name) || string.IsNullOrWhiteSpace(NewCredential.ConnectorType))
+        {
+            PlatformMessage = "نام Credential و نوع کانکتور اجباری است.";
+            return;
+        }
+
+        var credential = CloneCredential(NewCredential);
+        if (string.IsNullOrWhiteSpace(EditingCredentialId))
+        {
+            credential.Id = Guid.NewGuid().ToString("N");
+            CurrentState.ConnectorCredentials.Add(credential);
+        }
+        else
+        {
+            credential.Id = EditingCredentialId;
+            var index = CurrentState.ConnectorCredentials.FindIndex(item => item.Id == EditingCredentialId);
+            if (index >= 0)
+            {
+                CurrentState.ConnectorCredentials[index] = credential;
+            }
+            else
+            {
+                CurrentState.ConnectorCredentials.Add(credential);
+            }
+        }
+
+        CurrentState.InfrastructureConnectors.Add(credential.ConnectorType);
+
+        if (credential.ConnectorType == "PostgreSQL" && string.IsNullOrWhiteSpace(CurrentState.DatabaseConnection.CredentialId))
+        {
+            ApplyDatabaseCredential(credential);
+        }
+        else if (credential.Id == CurrentState.DatabaseConnection.CredentialId)
+        {
+            ApplyDatabaseCredential(credential);
+        }
+
+        var action = string.IsNullOrWhiteSpace(EditingCredentialId) ? "added" : "updated";
+        ResetCredentialForm();
+        CurrentProjectId = await SaveDraftAsync($"Connector credential {action}: {credential.Name} ({credential.ConnectorType}).");
+    }
+
+    private void EditCredential(ConnectorCredentialDefinition credential)
+    {
+        EditingCredentialId = credential.Id;
+        NewCredential = CloneCredential(credential);
+        IsCredentialModalOpen = true;
+    }
+
+    private async Task DeleteCredentialAsync(ConnectorCredentialDefinition credential)
+    {
+        CurrentState.ConnectorCredentials.RemoveAll(item => item.Id == credential.Id);
+        if (CurrentState.DatabaseConnection.CredentialId == credential.Id)
+        {
+            var fallback = DatabaseCredentials.FirstOrDefault();
+            if (fallback is null)
+            {
+                CurrentState.DatabaseConnection.CredentialId = string.Empty;
+            }
+            else
+            {
+                ApplyDatabaseCredential(fallback);
+            }
+        }
+
+        if (EditingCredentialId == credential.Id)
+        {
+            ResetCredentialForm();
+        }
+
+        CurrentProjectId = await SaveDraftAsync($"Connector credential deleted: {credential.Name} ({credential.ConnectorType}).");
+    }
+
+    private void ResetCredentialForm()
+    {
+        EditingCredentialId = null;
+        NewCredential = CreateEmptyCredential();
+        IsCredentialModalOpen = false;
+    }
+
+    private void OnCredentialConnectorChanged(ChangeEventArgs eventArgs)
+    {
+        var connectorType = eventArgs.Value?.ToString() ?? "PostgreSQL";
+        var previousName = NewCredential.Name;
+        NewCredential = CreateCredentialForConnector(connectorType);
+        if (!string.IsNullOrWhiteSpace(previousName) && previousName != "MainDb")
+        {
+            NewCredential.Name = previousName;
+        }
+
+        EditingCredentialId = null;
+        IsCredentialModalOpen = true;
+    }
+
+    private void OpenCredentialModal(string connectorType)
+    {
+        EditingCredentialId = null;
+        NewCredential = CreateCredentialForConnector(connectorType);
+        IsCredentialModalOpen = true;
+    }
+
+    private void CloseCredentialModal()
+    {
+        IsCredentialModalOpen = false;
+        EditingCredentialId = null;
+        NewCredential = CreateEmptyCredential();
+    }
+
+    private async Task OnDatabaseCredentialChangedAsync(ChangeEventArgs eventArgs)
+    {
+        var credentialId = eventArgs.Value?.ToString() ?? string.Empty;
+        var credential = CurrentState.ConnectorCredentials.FirstOrDefault(item => item.Id == credentialId);
+        if (credential is null)
+        {
+            CurrentState.DatabaseConnection.CredentialId = string.Empty;
+            return;
+        }
+
+        ApplyDatabaseCredential(credential);
+        CurrentProjectId = await SaveDraftAsync($"Database credential selected: {credential.Name}.");
+    }
+
+    private void ApplyDatabaseCredential(ConnectorCredentialDefinition credential)
+    {
+        CurrentState.DatabaseConnection.CredentialId = credential.Id;
+        CurrentState.DatabaseConnection.Provider = credential.ConnectorType;
+        CurrentState.DatabaseConnection.Host = credential.Host;
+        CurrentState.DatabaseConnection.Port = credential.Port;
+        CurrentState.DatabaseConnection.Database = credential.Database;
+        CurrentState.DatabaseConnection.Username = credential.Username;
+        CurrentState.DatabaseConnection.Password = credential.Password;
+        CurrentState.DatabaseConnection.SecretReference = credential.SecretReference;
+    }
+
+    private static ConnectorCredentialDefinition CreateEmptyCredential() => CreateCredentialForConnector("PostgreSQL");
+
+    private static ConnectorCredentialDefinition CreateCredentialForConnector(string connectorType) => connectorType switch
+    {
+        "MS SQL" => new()
+        {
+            Name = "SqlServerMain",
+            ConnectorType = "MS SQL",
+            Host = "127.0.0.1",
+            Port = 1433,
+            Database = "orders",
+            Username = "sa",
+            Password = string.Empty,
+            DomainName = string.Empty,
+            UseTls = true,
+            IgnoreSslIssues = false,
+            ConnectTimeout = 30,
+            RequestTimeout = 30,
+            TdsVersion = "7.4",
+            SecretReference = "local:mssql-password",
+            Description = "مسیر اتصال MS SQL Server"
+        },
+        "Redis" => new()
+        {
+            Name = "SessionCache",
+            ConnectorType = "Redis",
+            Host = "127.0.0.1",
+            Port = 6379,
+            Password = string.Empty,
+            DatabaseNumber = 0,
+            UseSsl = false,
+            SecretReference = "local:redis-password",
+            Description = "مسیر اتصال Redis Cache"
+        },
+        "RabbitMQ" => new()
+        {
+            Name = "EventBus",
+            ConnectorType = "RabbitMQ",
+            Host = "127.0.0.1",
+            Port = 5672,
+            Username = "guest",
+            Password = "guest",
+            VirtualHost = "/",
+            UseSsl = false,
+            Passwordless = false,
+            SecretReference = "local:rabbitmq-password",
+            Description = "مسیر اتصال RabbitMQ Broker"
+        },
+        "ELK" => new()
+        {
+            Name = "Observability",
+            ConnectorType = "ELK",
+            Host = "127.0.0.1",
+            Port = 9200,
+            Username = "elastic",
+            Password = string.Empty,
+            UseTls = false,
+            IgnoreSslIssues = false,
+            RequestTimeout = 30,
+            IndexPrefix = "logs-*",
+            SecretReference = "local:elk-password",
+            Description = "مسیر اتصال Elasticsearch/ELK"
+        },
+        _ => new()
+    {
+        Name = "MainDb",
+        ConnectorType = "PostgreSQL",
+        Host = "127.0.0.1",
+        Port = 5432,
+        Database = "orders",
+        Username = "postgres",
+        Password = string.Empty,
+        UseSsl = false,
+        IgnoreSslIssues = false,
+        UseSshTunnel = false,
+        SecretReference = "local:postgres-password",
+        Description = "مسیر اتصال دیتابیس این سرویس"
+    }
+    };
+
+    private static ConnectorCredentialDefinition CloneCredential(ConnectorCredentialDefinition credential) => new()
+    {
+        Id = credential.Id,
+        Name = credential.Name.Trim(),
+        ConnectorType = credential.ConnectorType,
+        Host = credential.Host.Trim(),
+        Port = credential.Port,
+        Database = credential.Database.Trim(),
+        Username = credential.Username.Trim(),
+        Password = credential.Password,
+        SecretReference = credential.SecretReference.Trim(),
+        Description = credential.Description.Trim(),
+        DomainName = credential.DomainName.Trim(),
+        UseTls = credential.UseTls,
+        IgnoreSslIssues = credential.IgnoreSslIssues,
+        ConnectTimeout = credential.ConnectTimeout,
+        RequestTimeout = credential.RequestTimeout,
+        TdsVersion = credential.TdsVersion.Trim(),
+        UseSsl = credential.UseSsl,
+        UseSshTunnel = credential.UseSshTunnel,
+        DatabaseNumber = credential.DatabaseNumber,
+        VirtualHost = credential.VirtualHost.Trim(),
+        Passwordless = credential.Passwordless,
+        ClientCertificate = credential.ClientCertificate,
+        ClientKey = credential.ClientKey,
+        Passphrase = credential.Passphrase,
+        CaCertificates = credential.CaCertificates,
+        IndexPrefix = credential.IndexPrefix.Trim()
+    };
+
+    private static string CredentialOptionText(ConnectorCredentialDefinition credential) =>
+        $"{credential.Name} - {credential.Database}@{credential.Host}:{credential.Port}";
+
+    private static string CredentialAddress(ConnectorCredentialDefinition credential) =>
+        credential.ConnectorType switch
+        {
+            "PostgreSQL" => $"{credential.Host}:{credential.Port}/{credential.Database}",
+            "MS SQL" => $"{credential.Host}:{credential.Port}/{credential.Database}",
+            "Redis" => $"{credential.Host}:{credential.Port}",
+            "RabbitMQ" => $"amqp://{credential.Host}:{credential.Port}",
+            "ELK" => $"{(credential.UseTls ? "https" : "http")}://{credential.Host}:{credential.Port}/{credential.IndexPrefix}",
+            _ => $"{credential.Host}:{credential.Port}/{credential.Database}"
+        };
+
+    private static ConnectorDefinition ConnectorDefinitionFor(string connectorType) =>
+        ConnectorCatalog.FirstOrDefault(connector => connector.Type == connectorType) ?? ConnectorCatalog[0];
+
+    private static string ConnectorIcon(string connectorType) => ConnectorDefinitionFor(connectorType).Icon;
+
+    private static string ConnectorLabel(string connectorType) => ConnectorDefinitionFor(connectorType).Label;
+
+    private static string ConnectorDescription(string connectorType) => ConnectorDefinitionFor(connectorType).Description;
+
+    private RenderFragment Dashboard() => @<div>
+        <section class="mg-stats">
+            <article>
+                <span>سرویس‌های تولیدشده</span>
+                <strong>12</strong>
+            </article>
+            <article>
+                <span>Connector‌های فعال</span>
+                <strong>7</strong>
+            </article>
+            <article>
+                <span>Template‌ها</span>
+                <strong>4</strong>
+            </article>
+        </section>
+
+        <div class="mg-section-title">پروژه‌های اخیر</div>
+
+        <section class="mg-project-list">
+            @foreach (var project in Projects)
+            {
+                <button class="mg-project-card" @onclick="StartNewService">
+                    <span class="mg-project-icon">@project.Icon</span>
+                    <span class="mg-project-info">
+                        <strong>@project.Name</strong>
+                        <small>@project.Meta</small>
+                    </span>
+                    <span class="mg-status-dot @project.Status"></span>
+                </button>
+            }
+        </section>
+
+        <button class="mg-btn mg-btn-primary mg-large-action" @onclick="StartNewService">سرویس جدید ↗</button>
+    </div>;
+
+    private RenderFragment Wizard() => @<div>
+        <nav class="mg-wizard-steps">
+            @for (var index = 0; index < WizardSteps.Count; index++)
+            {
+                var stepIndex = index;
+                <button class="mg-step @(StepClass(stepIndex))" @onclick="() => SetWizardStep(stepIndex)">
+                    <span>@(stepIndex + 1)</span>
+                    @WizardSteps[stepIndex]
+                </button>
+
+                @if (stepIndex < WizardSteps.Count - 1)
+                {
+                    <i></i>
+                }
+            }
+        </nav>
+
+        @switch (CurrentWizardStep)
+        {
+            case 0:
+                @StepService()
+                break;
+            case 1:
+                @StepArchitecture()
+                break;
+            case 2:
+                @StepDatabase()
+                break;
+            case 3:
+                @StepEntity()
+                break;
+            case 4:
+                @StepExternalApi()
+                break;
+            case 5:
+                @StepRules()
+                break;
+            case 6:
+                @StepGenerate()
+                break;
+        }
+    </div>;
+
+    private RenderFragment StepService() => @<div>
+        @AiBanner("دستیار AI", "نام دامنه را بنویس؛ موجودیت‌ها و معماری را پیشنهاد می‌دهم ↗")
+
+        <section class="mg-card">
+            <h2>اطلاعات سرویس</h2>
+            @if (StepServiceErrors.Count > 0)
+            {
+                <div class="mg-validation-box">
+                    @foreach (var error in StepServiceErrors)
+                    {
+                        <span>@error</span>
+                    }
+                </div>
+            }
+            <div class="mg-form-grid mg-service-form">
+                <div class="mg-service-form-column">
+                    <label>دسته‌بندی<input class="@RequiredClass(CurrentState.Project.Category)" @bind="CurrentState.Project.Category" @bind:event="oninput" dir="ltr" placeholder="Inquiry" required /></label>
+                    <label>نام سرویس<input class="@RequiredClass(CurrentState.Project.ServiceName)" @bind="CurrentState.Project.ServiceName" @bind:event="oninput" dir="ltr" required /></label>
+                    <label>Namespace<input @bind="CurrentState.Project.RootNamespace" @bind:event="oninput" dir="ltr" /></label>
+                    <label>نام خروجی نهایی<input value="@BuildOutputServiceName()" readonly dir="ltr" /></label>
+                </div>
+                <div class="mg-service-form-column">
+                    <label>نسخه .NET<select @bind="CurrentState.Project.TargetFramework"><option>net8.0</option></select></label>
+                    <label class="mg-service-description">توضیح سرویس<textarea class="@RequiredClass(CurrentState.Project.Description)" @bind="CurrentState.Project.Description" @bind:event="oninput" placeholder="توضیح کوتاه درباره هدف، دامنه و مسئولیت این سرویس" required></textarea></label>
+                </div>
+            </div>
+        </section>
+
+        @WizardActions("بعدی — معماری", showBack: false)
+    </div>;
+
+    private RenderFragment StepArchitecture() => @<div>
+        <section class="mg-card">
+            <div class="mg-card-head">
+                <h2>انتخاب معماری</h2>
+            </div>
+
+            <div class="mg-architecture-notice">
+                <i class="fa-solid fa-circle-info" aria-hidden="true"></i>
+                <span>با انتخاب هر معماری، ساختار خروجی آن به صورت درختی نمایش داده می‌شود.</span>
+            </div>
+
+            <div class="mg-architecture-grid" dir="ltr">
+                @foreach (var item in new[] { "Clean Architecture", "DDD", "CQRS + MediatR", "Minimal API" })
+                {
+                    <button class="mg-architecture @(SelectedArchitecture == item ? "sel" : "")" @onclick="() => SelectArchitecture(item)" dir="ltr">
+                        <strong class="mg-architecture-title">
+                            <i class="@ArchitectureIcon(item)" aria-hidden="true"></i>
+                            <span>@item</span>
+                        </strong>
+                        <span>@ArchitectureHint(item)</span>
+                    </button>
+                }
+            </div>
+        </section>
+
+        <section class="mg-card">
+            <div class="mg-card-head">
+                <h2>ساختار معماری انتخاب‌شده</h2>
+                <span class="mg-card-note">@SelectedArchitecture</span>
+            </div>
+            <pre class="mg-architecture-tree" dir="ltr">@ArchitectureTree(SelectedArchitecture)</pre>
+        </section>
+
+        @WizardActions("بعدی — دیتابیس")
+    </div>;
+
+    private RenderFragment StepDatabase() => @<div>
+        <section class="mg-card">
+            <div class="mg-card-head">
+                <h2>اتصال دیتابیس سرویس</h2>
+                <span class="mg-card-note">ابتدا Credential را در بخش Connector‌ها تعریف کنید، سپس برای این سرویس انتخاب کنید.</span>
+            </div>
+
+            <div class="mg-form-grid">
+                <label class="span-2">Credential دیتابیس
+                    <select value="@CurrentState.DatabaseConnection.CredentialId" @onchange="OnDatabaseCredentialChangedAsync" dir="ltr">
+                        @foreach (var databaseCredential in DatabaseCredentials)
+                        {
+                            <option value="@databaseCredential.Id">@CredentialOptionText(databaseCredential)</option>
+                        }
+                    </select>
+                </label>
+            </div>
+
+            @if (SelectedDatabaseCredential is { } credential)
+            {
+                <div class="mg-credential-summary">
+                    <div>
+                        <span>Connector</span>
+                        <strong>@credential.ConnectorType</strong>
+                    </div>
+                    <div>
+                        <span>Host</span>
+                        <strong dir="ltr">@credential.Host:@credential.Port</strong>
+                    </div>
+                    <div>
+                        <span>Database</span>
+                        <strong dir="ltr">@credential.Database</strong>
+                    </div>
+                    <div>
+                        <span>Secret</span>
+                        <strong dir="ltr">@credential.SecretReference</strong>
+                    </div>
+                </div>
+            }
+            else
+            {
+                <div class="mg-empty-state">
+                    Credential دیتابیس تعریف نشده است. از صفحه Connector‌ها یک Credential از نوع PostgreSQL ایجاد کنید.
+                </div>
+            }
+
+            <div class="mg-card-actions">
+                <button class="mg-btn" @onclick="() => Go(Screen.Connectors)">تعریف Credential</button>
+                <button class="mg-btn">تست اتصال</button>
+            </div>
+        </section>
+
+        <section class="mg-card">
+            <h2>Connector‌های زیرساخت</h2>
+            <div class="mg-chip-grid">
+                @foreach (var connector in new[] { "PostgreSQL", "Redis", "RabbitMQ", "Elasticsearch", "Kibana", "External API" })
+                {
+                    var selected = SelectedInfrastructureConnectors.Contains(connector);
+                    <button class="mg-chip @(selected ? "sel" : "")" @onclick="() => ToggleInfrastructureConnectorAsync(connector)">
+                        <span class="mg-chip-check">✓</span>
+                        <span>@connector</span>
+                    </button>
+                }
+            </div>
+        </section>
+
+        @WizardActions("بعدی — موجودیت")
+    </div>;
+
+    private RenderFragment StepEntity() => @<div>
+        <section class="mg-entity-shell">
+            <div class="mg-entity-header">
+                <h2>مرحله ۳ — موجودیت‌ها و متدها</h2>
+                <span>@BuildOutputServiceName()</span>
+            </div>
+
+            <nav class="mg-entity-tabs">
+                <button class="@(EntityDesignerStep == 0 ? "on" : "")" @onclick="() => EntityDesignerStep = 0">
+                    <span>1</span>
+                    تعریف موجودیت
+                </button>
+                <button class="@(EntityDesignerStep == 1 ? "on" : "")" @onclick="() => EntityDesignerStep = 1">
+                    <span>2</span>
+                    API متدهای
+                </button>
+                <button class="@(EntityDesignerStep == 2 ? "on" : "")" @onclick="() => EntityDesignerStep = 2">
+                    <span>3</span>
+                    پیش‌نمایش
+                </button>
+            </nav>
+
+            @switch (EntityDesignerStep)
+            {
+                case 0:
+                    @EntityDefinitionStep()
+                    break;
+                case 1:
+                    @EntityMethodsStep()
+                    break;
+                case 2:
+                    @EntityPreviewStep()
+                    break;
+            }
+        </section>
+
+        @WizardActions("بعدی — API خارجی")
+    </div>;
+
+    private RenderFragment EntityDefinitionStep() => @<div>
+        <div class="mg-hint-panel">
+            <span>☼</span>
+            ابتدا موجودیت و فیلدهای آن را تعریف کنید. بر اساس این فیلدها، متدها به صورت خودکار پیشنهاد می‌شوند.
+        </div>
+
+        <section class="mg-card mg-entity-card">
+            <h2>▣ موجودیت</h2>
+            <div class="mg-form-grid">
+                <label>نام موجودیت<input @bind="CurrentEntity.EntityName" @bind:event="oninput" dir="ltr" /></label>
+                <label>دیتابیس<select><option>MainDb — PostgreSQL</option></select></label>
+                <label>ORM<select><option>EF Core</option><option>Dapper</option></select></label>
+                <label>نوع منبع<select value="@SelectedSourceType" @onchange="OnSourceTypeChangedAsync">
+                    <option>موجودیت جدید</option>
+                    <option>جدول موجود</option>
+                    <option>Stored Proc</option>
+                    <option>Custom Query</option>
+                </select></label>
+            </div>
+        </section>
+
+        @if (SelectedSourceType == "جدول موجود")
+        {
+            <section class="mg-card mg-entity-card">
+                <div class="mg-card-head">
+                    <h2>انتخاب جدول PostgreSQL</h2>
+                    <span class="mg-card-note">ستون‌های انتخاب‌شده به فیلدهای موجودیت تبدیل می‌شوند.</span>
+                </div>
+
+                <div class="mg-table-picker">
+                    @foreach (var table in AvailableDatabaseTables)
+                    {
+                        <button class="mg-table-card @(IsSelectedTable(table) ? "sel" : "")" @onclick="() => SelectDatabaseTableAsync(table)">
+                            <strong>@table.Schema.@table.Name</strong>
+                            <small>@table.Columns.Count ستون</small>
+                        </button>
+                    }
+                </div>
+            </section>
+
+            @if (CurrentSelectedTable is { } selectedTable)
+            {
+                <section class="mg-card mg-entity-card">
+                    <div class="mg-card-head">
+                        <h2>ستون‌های @selectedTable.Name</h2>
+                        <div class="mg-card-actions">
+                            <button class="mg-btn" @onclick="SelectAllColumnsAsync">انتخاب همه</button>
+                            <button class="mg-btn" @onclick="DeselectAllColumnsAsync">لغو همه</button>
+                        </div>
+                    </div>
+
+                    <div class="mg-column-split">
+                        <div class="mg-column-box">
+                            <div class="mg-column-box-head">
+                                <span>Available</span>
+                                <b>@AvailableColumns.Count</b>
+                            </div>
+                            @if (AvailableColumns.Count == 0)
+                            {
+                                <div class="mg-column-empty">همه ستون‌ها انتخاب شده‌اند</div>
+                            }
+                            @foreach (var column in AvailableColumns)
+                            {
+                                <button class="mg-column-item" @onclick="() => AddColumnAsync(column)">
+                                    @ColumnRoleBadge(column)
+                                    <span>@column.Name</span>
+                                    <small>@column.Type</small>
+                                    <em>←</em>
+                                </button>
+                            }
+                        </div>
+
+                        <div class="mg-column-box">
+                            <div class="mg-column-box-head">
+                                <span>Selected</span>
+                                <b>@SelectedColumns.Count</b>
+                            </div>
+                            @if (SelectedColumns.Count == 0)
+                            {
+                                <div class="mg-column-empty">ستونی انتخاب نشده است</div>
+                            }
+                            @foreach (var column in SelectedColumns)
+                            {
+                                <button class="mg-column-item selected" @onclick="() => RemoveColumnAsync(column)">
+                                    @ColumnRoleBadge(column)
+                                    <span>@column.Name</span>
+                                    <small>@column.Type</small>
+                                    <em>→</em>
+                                </button>
+                            }
+                        </div>
+                    </div>
+                </section>
+            }
+        }
+
+        @if (SelectedSourceType == "Stored Proc")
+        {
+            <section class="mg-card mg-entity-card">
+                <div class="mg-card-head">
+                    <h2>Stored Procedure</h2>
+                    <span class="mg-card-note">برای پروسیجر، فیلدهای موجودیت نمایش داده نمی‌شود؛ فقط پروسیجر موردنظر را انتخاب کنید.</span>
+                </div>
+
+                <div class="mg-procedure-picker">
+                    @foreach (var procedure in AvailableStoredProcedures)
+                    {
+                        <button class="mg-procedure-card @(IsSelectedProcedure(procedure) ? "sel" : "")" @onclick="() => SelectStoredProcedureAsync(procedure)">
+                            <strong>@procedure.Schema.@procedure.Name</strong>
+                            <small>@procedure.Description</small>
+                            <span>@procedure.ReturnType</span>
+                        </button>
+                    }
+                </div>
+            </section>
+        }
+
+        @if (SelectedSourceType == "Custom Query")
+        {
+            <section class="mg-card mg-entity-card">
+                <h2>Custom Query</h2>
+                <div class="mg-form-grid">
+                    <label class="span-2">SQL<textarea dir="ltr" placeholder="SELECT * FROM orders WHERE status = @@Status"></textarea></label>
+                    <label>نام متد<input dir="ltr" placeholder="GetOrdersByStatusAsync" /></label>
+                    <label>نوع خروجی<input dir="ltr" placeholder="IEnumerable<OrderSummaryDto>" /></label>
+                </div>
+            </section>
+        }
+
+        @if (SelectedSourceType is not "Stored Proc")
+        {
+            <section class="mg-card mg-entity-card">
+                <div class="mg-card-head">
+                    <h2>▦ فیلدها</h2>
+                    <button class="mg-btn" @onclick="AddField">+ فیلد</button>
+                </div>
+
+                <div class="mg-field-table mg-field-table-large mg-field-table-ltr" dir="ltr">
+                    <div class="head"><span>Name</span><span>Type</span><span>Role</span><span></span></div>
+                    @foreach (var field in CurrentEntity.Fields)
+                    {
+                        <div class="row">
+                            <input @bind="field.PropertyName" @bind:event="oninput" dir="ltr" />
+                            <select @bind="field.ClrType" dir="ltr">
+                                @foreach (var type in SupportedClrTypes)
+                                {
+                                    <option>@type</option>
+                                }
+                            </select>
+                            <select value="@FieldRole(field)" @onchange="eventArgs => SetFieldRole(field, eventArgs.Value?.ToString())" dir="ltr">
+                                <option>PK</option>
+                                <option>FK</option>
+                                <option>Required</option>
+                                <option>Optional</option>
+                            </select>
+                            <button class="mg-icon-btn danger" @onclick="() => RemoveField(field)">⌫</button>
+                        </div>
+                    }
+                </div>
+            </section>
+        }
+
+        <div class="mg-entity-bottom">
+            <button class="mg-btn mg-btn-primary" @onclick="SuggestMethodsFromEntityAsync">متدها را پیشنهاد بده →</button>
+        </div>
+    </div>;
+
+    private RenderFragment EntityMethodsStep() => @<div>
+        <section class="mg-card mg-entity-card">
+            <div class="mg-card-head">
+                <h2>API متدهای `@CurrentEntity.EntityName`</h2>
+                <button class="mg-btn" @onclick="ResetEntityMethodsAsync">بازنشانی متدهای پایه</button>
+            </div>
+
+            <p class="mg-muted-line">نام متد، Verb، Route و نوع Command/Query از این قسمت خوانده شده و در خروجی میکروسرویس استفاده می‌شود.</p>
+
+            <div class="mg-method-table">
+                <div class="head">
+                    <span>نام متد</span>
+                    <span>Verb</span>
+                    <span>Route</span>
+                    <span>نوع</span>
+                    <span>Request DTO</span>
+                    <span>Response DTO</span>
+                    <span>قابلیت‌ها</span>
+                    <span>سرویس خارجی</span>
+                    <span></span>
+                </div>
+                @foreach (var method in EntityMethods)
+                {
+                    <div class="row">
+                        <input @bind="method.Name" @bind:event="oninput" dir="ltr" />
+                        <select @bind="method.Method">
+                            @foreach (var verb in HttpVerbs)
+                            {
+                                <option>@verb</option>
+                            }
+                        </select>
+                        <input @bind="method.Route" @bind:event="oninput" dir="ltr" />
+                        <select @bind="method.OperationType">
+                            <option>Command</option>
+                            <option>Query</option>
+                        </select>
+                        <input @bind="method.RequestDto" @bind:event="oninput" dir="ltr" />
+                        <input @bind="method.ResponseDto" @bind:event="oninput" dir="ltr" />
+                        <div class="mg-method-flags">
+                            <label><input type="checkbox" @bind="method.UsesExternalService" /> Ext</label>
+                            <label><input type="checkbox" @bind="method.UsesCache" /> Cache</label>
+                            <label><input type="checkbox" @bind="method.UsesMessageLog" /> Log</label>
+                            <label><input type="checkbox" @bind="method.UsesEncryption" /> Cert</label>
+                        </div>
+                        <input @bind="method.ExternalServiceName" @bind:event="oninput" dir="ltr" placeholder="Shahkar" disabled="@(!method.UsesExternalService)" />
+                        <button class="mg-icon-btn danger" @onclick="() => RemoveEntityMethodAsync(method)">⌫</button>
+                    </div>
+                }
+            </div>
+
+            <div class="mg-method-actions">
+                <button class="mg-btn mg-btn-primary" @onclick="AddEntityMethodAsync">+ متد سفارشی</button>
+                <label class="mg-inline-check"><input type="checkbox" @bind="NewMethodUsesPaging" /> paging</label>
+                <label class="mg-inline-check"><input type="checkbox" @bind="NewMethodUsesExternalService" /> External API</label>
+                <label class="mg-inline-check"><input type="checkbox" @bind="NewMethodUsesCache" /> Cache</label>
+                <label class="mg-inline-check"><input type="checkbox" @bind="NewMethodUsesMessageLog" /> RabbitMQ log</label>
+                <label class="mg-inline-check"><input type="checkbox" @bind="NewMethodUsesEncryption" /> Certificate</label>
+            </div>
+        </section>
+
+        <div class="mg-entity-bottom">
+            <button class="mg-btn" @onclick="() => EntityDesignerStep = 0">← بازگشت به موجودیت</button>
+            <button class="mg-btn mg-btn-primary" @onclick="() => EntityDesignerStep = 2">پیش‌نمایش →</button>
+        </div>
+    </div>;
+
+    private RenderFragment EntityPreviewStep() => @<div>
+        <section class="mg-card mg-entity-card">
+            <h2>◉ پیش‌نمایش کد تولیدی</h2>
+            <pre class="mg-output-tree" dir="ltr">@EntityPreviewText()</pre>
+        </section>
+        <div class="mg-entity-bottom">
+            <button class="mg-btn" @onclick="() => EntityDesignerStep = 1">← ویرایش متدها</button>
+        </div>
+    </div>;
+
+    private RenderFragment StepExternalApi() => @<div>
+        <section class="mg-card">
+            <h2>API خارجی اختیاری</h2>
+            @if (CurrentState.ExternalServices.Count == 0)
+            {
+                <button class="mg-btn mg-btn-primary" @onclick="AddExternalService">افزودن API خارجی</button>
+            }
+            else
+            {
+                var external = CurrentState.ExternalServices[0];
+                <div class="mg-connection-row info">
+                    <span class="mg-status-dot info"></span>
+                    <strong>@external.Name</strong>
+                    <small>@external.Type · @external.Authentication</small>
+                </div>
+
+                <div class="mg-form-grid">
+                    <label>نام سرویس<input @bind="external.Name" @bind:event="oninput" dir="ltr" /></label>
+                    <label>Base URL<input @bind="external.BaseUrl" @bind:event="oninput" dir="ltr" /></label>
+                    <label>احراز هویت<select @bind="external.Authentication"><option>JWT Bearer</option><option>API Key</option><option>OAuth2</option><option>None</option></select></label>
+                    <label>نوع<select @bind="external.Type"><option>REST</option><option>gRPC</option></select></label>
+                </div>
+                <button class="mg-btn">Import از Swagger / OpenAPI</button>
+                <button class="mg-btn" @onclick="RemoveExternalService">حذف API خارجی</button>
+            }
+        </section>
+
+        @WizardActions("بعدی — قوانین")
+    </div>;
+
+    private RenderFragment StepRules() => @<div>
+        @AiBanner("AI — پیشنهاد قوانین", "از روی فیلدها Validation و Domain Error پیشنهاد می‌دهم ↗")
+
+        <section class="mg-card">
+            <h2>Validation Rules</h2>
+            @foreach (var error in CurrentState.Errors)
+            {
+                <div class="mg-rule-row">
+                    <input @bind="error.EndpointName" @bind:event="oninput" dir="ltr" placeholder="Endpoint" />
+                    <select @bind="error.Type"><option>Validation</option><option>Business</option><option>External</option></select>
+                    <input @bind="error.Code" @bind:event="oninput" dir="ltr" placeholder="ERROR_CODE" />
+                    <input @bind="error.Message" @bind:event="oninput" placeholder="پیام خطا" />
+                    <button class="mg-icon-btn" @onclick="() => RemoveError(error)">×</button>
+                </div>
+            }
+            <button class="mg-btn" @onclick="AddError">قانون جدید</button>
+        </section>
+
+        <section class="mg-card">
+            <h2>Domain Errors</h2>
+            @foreach (var error in CurrentState.Errors)
+            {
+                <div class="mg-rule-row">
+                    <input @bind="error.Code" @bind:event="oninput" dir="ltr" />
+                    <select @bind="error.HttpStatus"><option>400</option><option>404</option><option>409</option><option>422</option><option>500</option><option>503</option></select>
+                    <input @bind="error.Message" @bind:event="oninput" />
+                    <button class="mg-icon-btn" @onclick="() => RemoveError(error)">×</button>
+                </div>
+            }
+            <button class="mg-btn" @onclick="AddError">خطای جدید</button>
+        </section>
+
+        @WizardActions("تولید سرویس")
+    </div>;
+
+    private RenderFragment StepGenerate() => @<div>
+        <section class="mg-card">
+            <h2>@(IsGenerating ? $"در حال تولید {BuildOutputServiceName()}..." : $"خروجی {BuildOutputServiceName()}")</h2>
+            @ProgressRow("اعتبارسنجی متادیتا", GenerationErrors.Count == 0 ? "100" : "35", GenerationErrors.Count == 0)
+            @ProgressRow("تولید Domain Layer", GenerationFinished ? "100" : "0", GenerationFinished)
+            @ProgressRow("تولید Infrastructure + Connectors", GenerationFinished ? "100" : "0", GenerationFinished)
+            @ProgressRow("Compile test در Sandbox", "100", GenerationFinished)
+        </section>
+
+        @if (GenerationErrors.Count > 0)
+        {
+            <section class="mg-card">
+                <h2>خطاهای آماده‌سازی خروجی</h2>
+                @foreach (var error in GenerationErrors)
+                {
+                    <p class="mg-platform-message">@error</p>
+                }
+                <button class="mg-btn" @onclick="() => SetWizardStep(0)">بازگشت و اصلاح</button>
+            </section>
+        }
+
+        @if (GenerationFinished)
+        {
+            <section class="mg-card">
+                <h2 class="success-title">تولید موفق — آماده دریافت خروجی</h2>
+                <p class="mg-mono" dir="ltr">@GeneratedOutputPath</p>
+                <pre class="mg-output-tree" dir="ltr">@BuildOutputTree()</pre>
+                <div class="mg-output-actions">
+                    <button class="mg-btn mg-btn-primary">دانلود .zip</button>
+                    <button class="mg-btn">Push به GitHub</button>
+                    <button class="mg-btn" @onclick="() => Go(Screen.Dashboard)">داشبورد</button>
+                </div>
+            </section>
+        }
+    </div>;
+
+    private RenderFragment ConnectorScreen() => @<div>
+        <section class="mg-card">
+            <div class="mg-card-head">
+                <h2>کانکتورهای قابل استفاده</h2>
+            </div>
+
+            <div class="mg-info-message">
+                <i class="fa-solid fa-circle-info" aria-hidden="true"></i>
+                <div>
+                    <strong>تعریف Credential</strong>
+                    <span>ابتدا نوع کانکتور را انتخاب کنید. تنظیمات همان کانکتور در پنجره جداگانه باز می‌شود و بعد از ذخیره، Credential در لیست پایین نمایش داده می‌شود.</span>
+                </div>
+            </div>
+
+            <div class="mg-connector-picker">
+                <label>Connector
+                    <select value="" @onchange="OnCredentialConnectorChanged" dir="ltr">
+                        <option value="">Select connector...</option>
+                        @foreach (var connector in ConnectorCatalog)
+                        {
+                            <option value="@connector.Type">@connector.Label</option>
+                        }
+                    </select>
+                </label>
+                <div class="mg-connector-catalog">
+                    @foreach (var connector in ConnectorCatalog)
+                    {
+                        <button class="mg-connector-option" @onclick="() => OpenCredentialModal(connector.Type)">
+                            <i class="@connector.Icon" aria-hidden="true"></i>
+                            <strong>@connector.Label</strong>
+                            <span>@connector.Description</span>
+                        </button>
+                    }
+                </div>
+            </div>
+        </section>
+
+        @if (IsCredentialModalOpen)
+        {
+            <div class="mg-modal-backdrop">
+                <section class="mg-modal" role="dialog" aria-modal="true">
+                    <div class="mg-modal-head">
+                        <div>
+                            <h2>@(EditingCredentialId is null ? "تعریف Credential" : "ویرایش Credential")</h2>
+                            <span>@ConnectorLabel(NewCredential.ConnectorType)</span>
+                        </div>
+                        <button class="mg-icon-btn" @onclick="CloseCredentialModal">×</button>
+                    </div>
+
+                    <div class="mg-form-grid mg-credential-form">
+                        <div class="mg-selected-connector span-2">
+                            <i class="@ConnectorIcon(NewCredential.ConnectorType)" aria-hidden="true"></i>
+                            <div>
+                                <strong>@ConnectorLabel(NewCredential.ConnectorType)</strong>
+                                <span>@ConnectorDescription(NewCredential.ConnectorType)</span>
+                            </div>
+                        </div>
+
+                        <label>نام Credential<input @bind="NewCredential.Name" @bind:event="oninput" dir="ltr" placeholder="MainDb" /></label>
+                        <label>Secret Reference<input @bind="NewCredential.SecretReference" @bind:event="oninput" dir="ltr" placeholder="k8s:secret/key" /></label>
+
+                        @switch (NewCredential.ConnectorType)
+                        {
+                            case "MS SQL":
+                                <label>Server name<input @bind="NewCredential.Host" @bind:event="oninput" dir="ltr" placeholder="sql.company.local" /></label>
+                                <label>Database name<input @bind="NewCredential.Database" @bind:event="oninput" dir="ltr" placeholder="orders" /></label>
+                                <label>User account / ID<input @bind="NewCredential.Username" @bind:event="oninput" dir="ltr" placeholder="sa" /></label>
+                                <label>Password<input type="password" @bind="NewCredential.Password" @bind:event="oninput" dir="ltr" /></label>
+                                <label>Port<input type="number" @bind="NewCredential.Port" dir="ltr" /></label>
+                                <label>Domain name<input @bind="NewCredential.DomainName" @bind:event="oninput" dir="ltr" placeholder="DOMAIN" /></label>
+                                <label>Connect Timeout<input type="number" @bind="NewCredential.ConnectTimeout" dir="ltr" /></label>
+                                <label>Request Timeout<input type="number" @bind="NewCredential.RequestTimeout" dir="ltr" /></label>
+                                <label>TDS Version<input @bind="NewCredential.TdsVersion" @bind:event="oninput" dir="ltr" placeholder="7.4" /></label>
+                                <label class="mg-inline-check"><input type="checkbox" @bind="NewCredential.UseTls" /> Use TLS</label>
+                                <label class="mg-inline-check"><input type="checkbox" @bind="NewCredential.IgnoreSslIssues" /> Ignore SSL Issues</label>
+                                break;
+                            case "Redis":
+                                <label>Host name<input @bind="NewCredential.Host" @bind:event="oninput" dir="ltr" placeholder="redis.company.local" /></label>
+                                <label>Port<input type="number" @bind="NewCredential.Port" dir="ltr" /></label>
+                                <label>Password<input type="password" @bind="NewCredential.Password" @bind:event="oninput" dir="ltr" /></label>
+                                <label>Database Number<input type="number" @bind="NewCredential.DatabaseNumber" dir="ltr" /></label>
+                                <label class="mg-inline-check"><input type="checkbox" @bind="NewCredential.UseSsl" /> SSL</label>
+                                break;
+                            case "RabbitMQ":
+                                <label>Hostname<input @bind="NewCredential.Host" @bind:event="oninput" dir="ltr" placeholder="rabbitmq.company.local" /></label>
+                                <label>Port<input type="number" @bind="NewCredential.Port" dir="ltr" /></label>
+                                <label>User<input @bind="NewCredential.Username" @bind:event="oninput" dir="ltr" placeholder="guest" /></label>
+                                <label>Password<input type="password" @bind="NewCredential.Password" @bind:event="oninput" dir="ltr" /></label>
+                                <label>Vhost<input @bind="NewCredential.VirtualHost" @bind:event="oninput" dir="ltr" placeholder="/" /></label>
+                                <label class="mg-inline-check"><input type="checkbox" @bind="NewCredential.UseSsl" /> Use SSL</label>
+                                <label class="mg-inline-check"><input type="checkbox" @bind="NewCredential.Passwordless" /> Passwordless</label>
+                                <label class="span-2">Client Certificate<textarea @bind="NewCredential.ClientCertificate" @bind:event="oninput" dir="ltr" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
+                                <label class="span-2">Client Key<textarea @bind="NewCredential.ClientKey" @bind:event="oninput" dir="ltr" placeholder="-----BEGIN PRIVATE KEY-----"></textarea></label>
+                                <label>Passphrase<input type="password" @bind="NewCredential.Passphrase" @bind:event="oninput" dir="ltr" /></label>
+                                <label class="span-2">CA Certificates<textarea @bind="NewCredential.CaCertificates" @bind:event="oninput" dir="ltr" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
+                                break;
+                            case "ELK":
+                                <label>Elasticsearch Host<input @bind="NewCredential.Host" @bind:event="oninput" dir="ltr" placeholder="elasticsearch.company.local" /></label>
+                                <label>Port<input type="number" @bind="NewCredential.Port" dir="ltr" /></label>
+                                <label>User<input @bind="NewCredential.Username" @bind:event="oninput" dir="ltr" placeholder="elastic" /></label>
+                                <label>Password<input type="password" @bind="NewCredential.Password" @bind:event="oninput" dir="ltr" /></label>
+                                <label>Index Prefix<input @bind="NewCredential.IndexPrefix" @bind:event="oninput" dir="ltr" placeholder="logs-*" /></label>
+                                <label>Request Timeout<input type="number" @bind="NewCredential.RequestTimeout" dir="ltr" /></label>
+                                <label class="mg-inline-check"><input type="checkbox" @bind="NewCredential.UseTls" /> Use TLS</label>
+                                <label class="mg-inline-check"><input type="checkbox" @bind="NewCredential.IgnoreSslIssues" /> Ignore SSL Issues</label>
+                                break;
+                            default:
+                                <label>Host / Domain<input @bind="NewCredential.Host" @bind:event="oninput" dir="ltr" placeholder="postgres.company.local" /></label>
+                                <label>Database name<input @bind="NewCredential.Database" @bind:event="oninput" dir="ltr" placeholder="orders" /></label>
+                                <label>User name<input @bind="NewCredential.Username" @bind:event="oninput" dir="ltr" placeholder="postgres" /></label>
+                                <label>Password<input type="password" @bind="NewCredential.Password" @bind:event="oninput" dir="ltr" /></label>
+                                <label>Port<input type="number" @bind="NewCredential.Port" dir="ltr" /></label>
+                                <label class="mg-inline-check"><input type="checkbox" @bind="NewCredential.UseSsl" /> SSL</label>
+                                <label class="mg-inline-check"><input type="checkbox" @bind="NewCredential.IgnoreSslIssues" /> Ignore SSL Issues</label>
+                                <label class="mg-inline-check"><input type="checkbox" @bind="NewCredential.UseSshTunnel" /> SSH Tunnel</label>
+                                break;
+                        }
+
+                        <label class="span-2">توضیح<input @bind="NewCredential.Description" @bind:event="oninput" placeholder="کاربرد این مسیر اتصال در سرویس" /></label>
+                    </div>
+
+                    <div class="mg-modal-actions">
+                        <button class="mg-btn" @onclick="CloseCredentialModal">انصراف</button>
+                        <button class="mg-btn mg-btn-primary" @onclick="AddCredentialAsync">@(EditingCredentialId is null ? "ذخیره Credential" : "ذخیره تغییرات")</button>
+                    </div>
+                </section>
+            </div>
+        }
+
+        <section class="mg-card">
+            <div class="mg-card-head">
+                <h2>Credentialهای پروژه</h2>
+                <span class="mg-card-note">هر Credential در یک سطر نمایش داده می‌شود و قابلیت ویرایش یا حذف دارد.</span>
+            </div>
+
+            <div class="mg-credentials-list">
+                @if (CurrentState.ConnectorCredentials.Count == 0)
+                {
+                    <div class="mg-empty-state">
+                        هنوز Credential تعریف نشده است. از لیست بالا یک کانکتور انتخاب کنید و تنظیمات اتصال را ثبت کنید.
+                    </div>
+                }
+                else
+                {
+                    @foreach (var credential in CurrentState.ConnectorCredentials)
+                    {
+                        <article class="mg-credential-row @(credential.Id == CurrentState.DatabaseConnection.CredentialId ? "sel" : "")">
+                            <div class="mg-credential-card-head">
+                                <i class="@ConnectorIcon(credential.ConnectorType)" aria-hidden="true"></i>
+                                <div>
+                                    <strong>@credential.Name</strong>
+                                    <span>@credential.ConnectorType</span>
+                                </div>
+                            </div>
+                            <p dir="ltr">@CredentialAddress(credential)</p>
+                            <small>@credential.Description</small>
+                            <div class="mg-credential-card-actions">
+                                <button class="mg-btn" @onclick="() => EditCredential(credential)">ویرایش</button>
+                                <button class="mg-btn danger" @onclick="() => DeleteCredentialAsync(credential)">حذف</button>
+                            </div>
+                        </article>
+                    }
+                }
+            </div>
+        </section>
+    </div>;
+
+    private RenderFragment SettingsScreen() => @<div>
+        <section class="mg-card">
+            <div class="mg-card-head">
+                <h2>تنظیمات نمایش</h2>
+                <span class="mg-card-note">Theme روی کل محیط IRMSGen اعمال می‌شود.</span>
+            </div>
+
+            <div class="mg-settings-grid">
+                <article class="mg-setting-card">
+                    <strong>Theme mode</strong>
+                    <span>حالت روشن یا تاریک برای داشبورد، Wizard، فرم‌ها و خروجی‌ها.</span>
+                    <div class="mg-theme-switch">
+                        <button class="@(ThemeMode == "dark" ? "on" : "")" @onclick='() => SetThemeAsync("dark")'>
+                            Dark
+                        </button>
+                        <button class="@(ThemeMode == "light" ? "on" : "")" @onclick='() => SetThemeAsync("light")'>
+                            Light
+                        </button>
+                    </div>
+                </article>
+
+                <article class="mg-setting-card">
+                    <strong>Layout direction</strong>
+                    <span>جهت نمایش کل پلتفرم را برای فارسی یا محیط‌های انگلیسی تغییر می‌دهد.</span>
+                    <div class="mg-theme-switch">
+                        <button class="@(LayoutDirection == "rtl" ? "on" : "")" @onclick='() => SetDirectionAsync("rtl")'>
+                            RTL
+                        </button>
+                        <button class="@(LayoutDirection == "ltr" ? "on" : "")" @onclick='() => SetDirectionAsync("ltr")'>
+                            LTR
+                        </button>
+                    </div>
+                </article>
+
+                <article class="mg-setting-card">
+                    <strong>Preview</strong>
+                    <span>نمونه رنگ‌ها و کنترل‌ها برای بررسی سریع خوانایی.</span>
+                    <div class="mg-theme-preview">
+                        <span class="mg-badge ok">Connected</span>
+                        <span class="mg-badge neutral">Draft</span>
+                        <button class="mg-btn mg-btn-primary">Primary action</button>
+                    </div>
+                </article>
+            </div>
+        </section>
+    </div>;
+
+    private RenderFragment<AiBannerModel> AiBannerTemplate => model => @<div class="mg-ai-banner">
+        <span></span>
+        <div>
+            <strong>@model.Title</strong>
+            <small>@model.Text</small>
+        </div>
+        <em>←</em>
+    </div>;
+
+    private RenderFragment AiBanner(string title, string text) => AiBannerTemplate(new AiBannerModel(title, text));
+
+    private RenderFragment WizardActions(string nextText, bool showBack = true) => @<div class="mg-actions">
+        @if (showBack)
+        {
+            <button class="mg-btn" @onclick="PreviousStep">قبلی</button>
+        }
+        else
+        {
+            <button class="mg-btn" @onclick="() => Go(Screen.Dashboard)">انصراف</button>
+        }
+        <button class="mg-btn mg-btn-primary" @onclick="NextStep">@nextText</button>
+    </div>;
+
+    private RenderFragment ProgressRow(string text, string percent, bool done) => @<div class="mg-progress-row">
+        <div>
+            <span>@text</span>
+            <strong>@(done ? "کامل" : "در حال اجرا...")</strong>
+        </div>
+        <i><b style="width:@($"{percent}%")"></b></i>
+    </div>;
+
+    private string StepClass(int step) =>
+        step == CurrentWizardStep ? "on" : step < CurrentWizardStep ? "done" : string.Empty;
+
+    private static string ArchitectureHint(string architecture) => architecture switch
+    {
+        "Clean Architecture" => "API · Application · Domain · Infra",
+        "DDD" => "Aggregate · Value Objects",
+        "CQRS + MediatR" => "Commands · Queries · Handlers",
+        _ => "سبک · بدون Controller"
+    };
+
+    private static string ArchitectureIcon(string architecture) => architecture switch
+    {
+        "Clean Architecture" => "fa-solid fa-layer-group",
+        "DDD" => "fa-solid fa-cubes-stacked",
+        "CQRS + MediatR" => "fa-solid fa-code-branch",
+        _ => "fa-solid fa-bolt"
+    };
+
+    private static string ArchitectureTree(string architecture)
+    {
+        string[] lines = architecture switch
+        {
+            "DDD" =>
+            [
+                "MyService/",
+                "├── src/",
+                "│   ├── MyService.Api/",
+                "│   │   ├── Controllers/",
+                "│   │   └── Middlewares/",
+                "│   ├── MyService.Application/",
+                "│   │   ├── UseCases/",
+                "│   │   ├── DTOs/",
+                "│   │   └── Ports/",
+                "│   ├── MyService.Domain/",
+                "│   │   ├── Aggregates/",
+                "│   │   ├── Entities/",
+                "│   │   ├── ValueObjects/",
+                "│   │   ├── DomainEvents/",
+                "│   │   └── Repositories/",
+                "│   ├── MyService.Infrastructure/",
+                "│   │   ├── Persistence/",
+                "│   │   ├── ExternalServices/",
+                "│   │   └── Messaging/",
+                "│   └── MyService.Contracts/",
+                "└── deploy/"
+            ],
+            "CQRS + MediatR" =>
+            [
+                "MyService/",
+                "├── src/",
+                "│   ├── MyService.Api/",
+                "│   │   └── Controllers/",
+                "│   ├── MyService.Application/",
+                "│   │   ├── Features/",
+                "│   │   │   └── Entity/",
+                "│   │   │       ├── Commands/",
+                "│   │   │       ├── Queries/",
+                "│   │   │       ├── Handlers/",
+                "│   │   │       └── DTOs/",
+                "│   │   ├── Behaviors/",
+                "│   │   └── Abstractions/",
+                "│   ├── MyService.Domain/",
+                "│   ├── MyService.Infrastructure/",
+                "│   └── MyService.Contracts/",
+                "└── tests/"
+            ],
+            "Minimal API" =>
+            [
+                "MyService/",
+                "├── src/",
+                "│   ├── MyService.Api/",
+                "│   │   ├── Endpoints/",
+                "│   │   ├── Requests/",
+                "│   │   └── Program.cs",
+                "│   ├── MyService.Application/",
+                "│   │   ├── Services/",
+                "│   │   └── DTOs/",
+                "│   ├── MyService.Domain/",
+                "│   └── MyService.Infrastructure/",
+                "└── deploy/"
+            ],
+            _ =>
+            [
+                "MyService/",
+                "├── src/",
+                "│   ├── MyService.Api/",
+                "│   │   ├── Controllers/",
+                "│   │   ├── Requests/",
+                "│   │   ├── Responses/",
+                "│   │   └── Middlewares/",
+                "│   ├── MyService.Application/",
+                "│   │   ├── Abstractions/",
+                "│   │   │   └── Repositories/",
+                "│   │   ├── Features/",
+                "│   │   │   └── Entity/",
+                "│   │   │       ├── DTOs/",
+                "│   │   │       ├── Operations/",
+                "│   │   │       └── EntityFeatureService.cs",
+                "│   │   └── Common/",
+                "│   ├── MyService.Domain/",
+                "│   │   ├── Entities/",
+                "│   │   ├── ValueObjects/",
+                "│   │   ├── Events/",
+                "│   │   └── Repositories/",
+                "│   ├── MyService.Infrastructure/",
+                "│   │   ├── Persistence/",
+                "│   │   ├── Caching/",
+                "│   │   ├── Messaging/",
+                "│   │   └── ExternalServices/",
+                "│   └── MyService.Contracts/",
+                "├── docker-compose.yml",
+                "└── deploy/",
+                "    ├── k8s/",
+                "    └── helm/"
+            ]
+        };
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private static IReadOnlyList<string> SupportedClrTypes { get; } =
+    [
+        "Guid",
+        "string",
+        "int",
+        "long",
+        "decimal",
+        "Enum",
+        "bool",
+        "DateTime"
+    ];
+
+    private static IReadOnlyList<string> HttpVerbs { get; } =
+    [
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE"
+    ];
+
+    private DataObjectDefinition CurrentEntity
+    {
+        get
+        {
+            if (CurrentState.DataObjects.Count == 0)
+            {
+                CurrentState.DataObjects.Add(CreateDefaultDataObject());
+            }
+
+            return CurrentState.DataObjects[0];
+        }
+    }
+
+    private IReadOnlyList<ApiEndpointDefinition> EntityMethods
+    {
+        get
+        {
+            EnsureEntityMethods();
+            return CurrentState.ApiEndpoints
+                .Where(endpoint => string.Equals(endpoint.Feature, Pluralize(NormalizeIdentifier(CurrentEntity.EntityName, "Entity")), StringComparison.Ordinal))
+                .ToList();
+        }
+    }
+
+    private async Task GenerateFromInputAsync()
+    {
+        if (IsGenerating)
+        {
+            return;
+        }
+
+        IsGenerating = true;
+        GenerationFinished = false;
+        GenerationErrors = [];
+        GeneratedOutputPath = null;
+        CurrentWizardStep = 6;
+        CurrentState.CurrentStep = WizardStep.Generate;
+        CurrentProjectId = await SaveDraftAsync("Generation requested from visual wizard.");
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var metadata = BuildMetadataFromWizard();
+            var result = GenerationService.Generate(metadata);
+
+            GenerationErrors = result.Errors;
+            GeneratedOutputPath = result.OutputPath;
+            GenerationFinished = result.Errors.Count == 0;
+        }
+        catch
+        {
+            GenerationErrors = ["تولید پروژه انجام نشد. تنظیمات ورودی را بررسی کنید و دوباره تلاش کنید."];
+            GeneratedOutputPath = null;
+            GenerationFinished = false;
+        }
+        finally
+        {
+            IsGenerating = false;
+        }
+
+        if (CurrentProjectId is { } projectId)
+        {
+            var message = GenerationFinished
+                ? $"Generation completed. Output: {GeneratedOutputPath}"
+                : $"Generation failed. Errors: {string.Join(" | ", GenerationErrors)}";
+            await WorkspaceStore.AddGenerationLogAsync(projectId, GenerationFinished ? "Information" : "Error", message);
+        }
+    }
+
+    private ServiceMetadata BuildMetadataFromWizard()
+    {
+        var serviceName = BuildOutputServiceName();
+        var entities = CurrentState.DataObjects
+            .Where(entity => !string.IsNullOrWhiteSpace(entity.EntityName))
+            .Select(entity => new EntityMetadata
+            {
+                Name = NormalizeIdentifier(entity.EntityName, "GeneratedEntity"),
+                GenerateCrud = true,
+                Fields = BuildFields(entity, NormalizeIdentifier(entity.EntityName, "GeneratedEntity")).ToList(),
+                Methods = BuildMethods(entity).ToList()
+            })
+            .ToList();
+
+        if (entities.Count == 0)
+        {
+            entities.Add(new EntityMetadata
+            {
+                Name = "GeneratedEntity",
+                GenerateCrud = true,
+                Fields =
+                [
+                    new() { Name = "Id", Type = "Guid", Required = true },
+                    new() { Name = "Name", Type = "string", Required = true }
+                ],
+                Methods = []
+            });
+        }
+
+        return new ServiceMetadata
+        {
+            ServiceName = serviceName,
+            TargetFramework = CurrentState.Project.TargetFramework,
+            Architecture = SelectedArchitecture,
+            Database = "postgresql",
+            Entities = entities
+        };
+    }
+
+    private static IEnumerable<FieldMetadata> BuildFields(DataObjectDefinition entity, string entityName)
+    {
+        var fields = entity.Fields
+            .Where(field => field.IncludeInEntity && !string.IsNullOrWhiteSpace(field.PropertyName))
+            .Select(field => new FieldMetadata
+            {
+                Name = NormalizeFieldName(field.PropertyName, entityName),
+                Type = field.ClrType == "Enum"
+                    ? "string"
+                    : SupportedClrTypes.Contains(field.ClrType) ? field.ClrType : "string",
+                Required = field.IsPrimaryKey || !field.IsNullable
+            })
+            .ToList();
+
+        if (!fields.Any(field => field.Name == "Id" && field.Type == "Guid"))
+        {
+            fields.Insert(0, new FieldMetadata { Name = "Id", Type = "Guid", Required = true });
+        }
+
+        return fields
+            .GroupBy(field => field.Name, StringComparer.Ordinal)
+            .Select(group => group.First());
+    }
+
+    private IEnumerable<MethodMetadata> BuildMethods(DataObjectDefinition entity)
+    {
+        var entityName = NormalizeIdentifier(entity.EntityName, "Entity");
+        var feature = Pluralize(entityName);
+        EnsureEntityMethods();
+
+        return CurrentState.ApiEndpoints
+            .Where(endpoint => string.Equals(endpoint.Feature, feature, StringComparison.Ordinal))
+            .Where(endpoint => !string.IsNullOrWhiteSpace(endpoint.Name))
+            .Select(endpoint => new MethodMetadata
+            {
+                Name = NormalizeIdentifier(endpoint.Name, $"{endpoint.OperationType}{entityName}"),
+                HttpMethod = NormalizeHttpMethod(endpoint.Method),
+                Route = NormalizeRoute(endpoint.Route, entityName),
+                OperationType = endpoint.OperationType == "Command" ? "Command" : "Query",
+                RequestDto = NormalizeOptionalIdentifier(endpoint.RequestDto),
+                ResponseDto = NormalizeOptionalIdentifier(endpoint.ResponseDto),
+                UsesPaging = endpoint.UsesPaging,
+                UsesDatabase = endpoint.UsesDatabase,
+                UsesExternalService = endpoint.UsesExternalService,
+                ExternalServiceName = NormalizeOptionalIdentifier(endpoint.ExternalServiceName),
+                UsesCache = endpoint.UsesCache,
+                UsesMessageLog = endpoint.UsesMessageLog,
+                UsesEncryption = endpoint.UsesEncryption
+            })
+            .GroupBy(method => method.Name, StringComparer.Ordinal)
+            .Select(group => group.First());
+    }
+
+    private static string NormalizeHttpMethod(string value) =>
+        HttpVerbs.Contains(value.ToUpperInvariant()) ? value.ToUpperInvariant() : "GET";
+
+    private static string NormalizeRoute(string? route, string entityName)
+    {
+        if (!string.IsNullOrWhiteSpace(route))
+        {
+            return route.Trim();
+        }
+
+        return $"/api/{ToKebabCase(Pluralize(entityName))}";
+    }
+
+    private static string NormalizeOptionalIdentifier(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? string.Empty : NormalizeIdentifier(value, string.Empty);
+
+    private static string NormalizeFieldName(string? value, string entityName)
+    {
+        var fieldName = NormalizeIdentifier(value, "Field");
+        return string.Equals(fieldName, entityName, StringComparison.Ordinal)
+            ? $"{fieldName}Value"
+            : fieldName;
+    }
+
+    private void AddField()
+    {
+        var index = CurrentEntity.Fields.Count + 1;
+        CurrentEntity.Fields.Add(new FieldMappingDefinition
+        {
+            SourceName = $"field_{index}",
+            PropertyName = $"Field{index}",
+            DbType = "varchar",
+            ClrType = "string",
+            IncludeInEntity = true
+        });
+    }
+
+    private void RemoveField(FieldMappingDefinition field)
+    {
+        CurrentEntity.Fields.Remove(field);
+        if (CurrentEntity.Fields.Count == 0)
+        {
+            AddField();
+        }
+    }
+
+    private static string FieldRole(FieldMappingDefinition field)
+    {
+        if (field.IsPrimaryKey)
+        {
+            return "PK";
+        }
+
+        if (field.PropertyName.EndsWith("Id", StringComparison.Ordinal) && field.ClrType == "Guid")
+        {
+            return "FK";
+        }
+
+        return field.IsNullable ? "Optional" : "Required";
+    }
+
+    private static void SetFieldRole(FieldMappingDefinition field, string? role)
+    {
+        field.IsPrimaryKey = role == "PK";
+        field.IsNullable = role == "Optional";
+        if (role == "PK" || role == "FK")
+        {
+            field.ClrType = "Guid";
+        }
+    }
+
+    private async Task SuggestMethodsFromEntityAsync()
+    {
+        ResetEntityMethods();
+        EntityDesignerStep = 1;
+        CurrentProjectId = await SaveDraftAsync($"Methods suggested for entity: {CurrentEntity.EntityName}.");
+    }
+
+    private void AddEntityMethod()
+    {
+        var entityName = NormalizeIdentifier(CurrentEntity.EntityName, "Entity");
+        var feature = Pluralize(entityName);
+        var methodIndex = CurrentState.ApiEndpoints.Count(endpoint => endpoint.Feature == feature) + 1;
+        CurrentState.ApiEndpoints.Add(new ApiEndpointDefinition
+        {
+            Name = $"Custom{entityName}Method{methodIndex}",
+            Feature = feature,
+            Method = "POST",
+            Route = $"/api/{ToKebabCase(Pluralize(entityName))}/custom-{methodIndex}",
+            OperationType = "Command",
+            RequestDto = $"{entityName}Request",
+            ResponseDto = $"{entityName}Response",
+            UsesPaging = NewMethodUsesPaging,
+            UsesDatabase = true,
+            UsesExternalService = NewMethodUsesExternalService,
+            ExternalServiceName = NewMethodUsesExternalService
+                ? (CurrentState.ExternalServices.FirstOrDefault()?.Name ?? "ExternalService")
+                : string.Empty,
+            UsesCache = NewMethodUsesCache,
+            UsesMessageLog = NewMethodUsesMessageLog,
+            UsesEncryption = NewMethodUsesEncryption
+        });
+    }
+
+    private async Task AddEntityMethodAsync()
+    {
+        AddEntityMethod();
+        CurrentProjectId = await SaveDraftAsync("Entity method added from visual wizard.");
+    }
+
+    private void RemoveEntityMethod(ApiEndpointDefinition method)
+    {
+        CurrentState.ApiEndpoints.Remove(method);
+    }
+
+    private async Task RemoveEntityMethodAsync(ApiEndpointDefinition method)
+    {
+        RemoveEntityMethod(method);
+        CurrentProjectId = await SaveDraftAsync($"Entity method removed: {method.Name}.");
+    }
+
+    private void ResetEntityMethods()
+    {
+        var entityName = NormalizeIdentifier(CurrentEntity.EntityName, "Entity");
+        var feature = Pluralize(entityName);
+        CurrentState.ApiEndpoints.RemoveAll(endpoint => endpoint.Feature == feature);
+        AddCrudMethods(entityName);
+    }
+
+    private async Task ResetEntityMethodsAsync()
+    {
+        ResetEntityMethods();
+        CurrentProjectId = await SaveDraftAsync("Entity methods reset to CRUD defaults.");
+    }
+
+    private void EnsureEntityMethods()
+    {
+        var entityName = NormalizeIdentifier(CurrentEntity.EntityName, "Entity");
+        var feature = Pluralize(entityName);
+        if (!CurrentState.ApiEndpoints.Any(endpoint => endpoint.Feature == feature))
+        {
+            AddCrudMethods(entityName);
+        }
+    }
+
+    private void AddCrudMethods(string entityName)
+    {
+        var feature = Pluralize(entityName);
+        var routeBase = $"/api/{ToKebabCase(feature)}";
+        CurrentState.ApiEndpoints.AddRange(
+        [
+            new()
+            {
+                Name = $"Create{entityName}",
+                Feature = feature,
+                Method = "POST",
+                Route = routeBase,
+                OperationType = "Command",
+                RequestDto = $"Create{entityName}Request",
+                ResponseDto = $"{entityName}Response"
+            },
+            new()
+            {
+                Name = $"Update{entityName}",
+                Feature = feature,
+                Method = "PUT",
+                Route = $"{routeBase}/{{id}}",
+                OperationType = "Command",
+                RequestDto = $"Update{entityName}Request",
+                ResponseDto = $"{entityName}Response"
+            },
+            new()
+            {
+                Name = $"Get{entityName}ById",
+                Feature = feature,
+                Method = "GET",
+                Route = $"{routeBase}/{{id}}",
+                OperationType = "Query",
+                ResponseDto = $"{entityName}Response"
+            },
+            new()
+            {
+                Name = $"Search{Pluralize(entityName)}",
+                Feature = feature,
+                Method = "GET",
+                Route = routeBase,
+                OperationType = "Query",
+                ResponseDto = $"{entityName}Response",
+                UsesPaging = true
+            },
+            new()
+            {
+                Name = $"Delete{entityName}",
+                Feature = feature,
+                Method = "DELETE",
+                Route = $"{routeBase}/{{id}}",
+                OperationType = "Command"
+            }
+        ]);
+    }
+
+    private string EntityPreviewText()
+    {
+        EnsureEntityMethods();
+        var builder = new System.Text.StringBuilder();
+        var serviceName = BuildOutputServiceName();
+        builder.AppendLine($"{serviceName}/");
+        builder.AppendLine($"├── src/{serviceName}.Api/Controllers/{CurrentEntity.EntityName}Controller.cs");
+        builder.AppendLine($"├── src/{serviceName}.Application/Features/{Pluralize(CurrentEntity.EntityName)}/");
+        builder.AppendLine($"│   ├── DTOs/{CurrentEntity.EntityName}Dto.cs");
+        if (SelectedArchitecture == "CQRS + MediatR")
+        {
+            builder.AppendLine("│   ├── Commands/");
+            builder.AppendLine("│   └── Queries/");
+        }
+        else
+        {
+            builder.AppendLine($"│   ├── DTOs/Create{CurrentEntity.EntityName}Input.cs");
+            builder.AppendLine($"│   ├── DTOs/Update{CurrentEntity.EntityName}Input.cs");
+            builder.AppendLine("│   └── Operations/");
+        }
+        builder.AppendLine($"└── src/{serviceName}.Domain/Entities/{CurrentEntity.EntityName}.cs");
+        builder.AppendLine();
+        builder.AppendLine("Fields:");
+        foreach (var field in CurrentEntity.Fields)
+        {
+            builder.AppendLine($"- {field.PropertyName}: {field.ClrType} ({FieldRole(field)})");
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("API Methods:");
+        foreach (var method in EntityMethods)
+        {
+            builder.AppendLine($"- {method.Method} {method.Route} => {method.Name} ({method.OperationType})");
+        }
+
+        return builder.ToString();
+    }
+
+    private void AddExternalService()
+    {
+        CurrentState.ExternalServices.Add(new ExternalServiceDefinition
+        {
+            Name = "ExternalService",
+            Type = "REST",
+            BaseUrl = "https://api.example.com",
+            Authentication = "None"
+        });
+    }
+
+    private void RemoveExternalService()
+    {
+        CurrentState.ExternalServices.Clear();
+    }
+
+    private void AddError()
+    {
+        CurrentState.Errors.Add(new ErrorDefinition
+        {
+            EndpointName = $"Create{NormalizeIdentifier(CurrentEntity.EntityName, "Entity")}",
+            Code = $"{ToSnakeCase(NormalizeIdentifier(CurrentEntity.EntityName, "Entity")).ToUpperInvariant()}_ERROR",
+            HttpStatus = 400,
+            Type = "Validation",
+            Message = "خطای اعتبارسنجی"
+        });
+    }
+
+    private void RemoveError(ErrorDefinition error)
+    {
+        CurrentState.Errors.Remove(error);
+    }
+
+    private static DataObjectDefinition CreateDefaultDataObject() => new()
+    {
+        Kind = "Entity",
+        Schema = "public",
+        DatabaseName = "postgres",
+        EntityName = "Order",
+        Fields =
+        [
+            new() { SourceName = "id", PropertyName = "Id", DbType = "uuid", ClrType = "Guid", IsPrimaryKey = true, IncludeInEntity = true },
+            new() { SourceName = "name", PropertyName = "Name", DbType = "varchar", ClrType = "string", IncludeInEntity = true }
+        ]
+    };
+
+    private string BuildOutputTree()
+    {
+        var serviceName = BuildOutputServiceName();
+        return string.Join(Environment.NewLine,
+        [
+            $"{serviceName}/",
+            $"├── {serviceName}.sln",
+            "├── src/",
+            $"│   ├── {serviceName}.Api/",
+            "│   │   ├── Controllers/",
+            "│   │   ├── Requests/",
+            "│   │   ├── Responses/",
+            "│   │   └── Middlewares/",
+            $"│   ├── {serviceName}.Application/",
+            "│   │   ├── Abstractions/",
+            "│   │   └── Features/",
+            $"│   ├── {serviceName}.Domain/",
+            $"│   ├── {serviceName}.Infrastructure/",
+            "│   │   ├── Persistence/",
+            "│   │   ├── Caching/",
+            "│   │   ├── Messaging/",
+            "│   │   └── ExternalServices/",
+            $"│   └── {serviceName}.Contracts/",
+            "├── docker-compose.yml",
+            "└── deploy/",
+            "    ├── k8s/",
+            "    └── helm/"
+        ]);
+    }
+
+    private string BuildOutputServiceName()
+    {
+        var category = NormalizeIdentifier(CurrentState.Project.Category, string.Empty);
+        var serviceName = NormalizeIdentifier(CurrentState.Project.ServiceName, "GeneratedService");
+
+        if (string.IsNullOrWhiteSpace(category) ||
+            serviceName.StartsWith(category, StringComparison.OrdinalIgnoreCase))
+        {
+            return serviceName;
+        }
+
+        return $"{category}.{serviceName}";
+    }
+
+    private static string NormalizeIdentifier(string? value, string fallback)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return fallback;
+        }
+
+        var builder = new System.Text.StringBuilder();
+        foreach (var character in value)
+        {
+            if (char.IsLetterOrDigit(character) || character == '_')
+            {
+                builder.Append(character);
+            }
+        }
+
+        if (builder.Length == 0)
+        {
+            return fallback;
+        }
+
+        if (char.IsDigit(builder[0]))
+        {
+            builder.Insert(0, '_');
+        }
+
+        return builder.ToString();
+    }
+
+    private static string ToSnakeCase(string value)
+    {
+        var builder = new System.Text.StringBuilder();
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            if (char.IsUpper(character) && index > 0)
+            {
+                builder.Append('_');
+            }
+
+            builder.Append(char.ToLowerInvariant(character));
+        }
+
+        return builder.ToString();
+    }
+
+    private static string ToKebabCase(string value) => ToSnakeCase(value).Replace('_', '-');
+
+    private static string Pluralize(string value) => value.EndsWith('s') ? value : $"{value}s";
+
+    private IReadOnlyList<DatabaseTablePreview> AvailableDatabaseTables { get; } =
+    [
+        new("public", "orders",
+        [
+            new("id", "uuid", "PK"),
+            new("customer_id", "uuid", "FK"),
+            new("status", "varchar", "Required"),
+            new("total_amount", "numeric", "Required"),
+            new("created_at", "timestamp", "Required"),
+            new("updated_at", "timestamp", "Optional"),
+            new("notes", "text", "Optional")
+        ]),
+        new("public", "customers",
+        [
+            new("id", "uuid", "PK"),
+            new("full_name", "varchar", "Required"),
+            new("email", "varchar", "Optional"),
+            new("phone", "varchar", "Optional"),
+            new("created_at", "timestamp", "Required")
+        ]),
+        new("public", "order_items",
+        [
+            new("id", "uuid", "PK"),
+            new("order_id", "uuid", "FK"),
+            new("product_id", "uuid", "FK"),
+            new("quantity", "int", "Required"),
+            new("unit_price", "numeric", "Required")
+        ])
+    ];
+
+    private IReadOnlyList<StoredProcedurePreview> AvailableStoredProcedures { get; } =
+    [
+        new("public", "usp_get_orders_by_customer", "Order", "IReadOnlyList<OrderDto>", "دریافت سفارش‌های مشتری"),
+        new("public", "usp_calculate_order_summary", "OrderSummary", "OrderSummaryDto", "محاسبه خلاصه مالی سفارش"),
+        new("public", "usp_sync_customer_status", "CustomerStatus", "OperationResultDto", "همگام‌سازی وضعیت مشتری")
+    ];
+
+    private DatabaseTablePreview? CurrentSelectedTable =>
+        AvailableDatabaseTables.FirstOrDefault(table =>
+            string.Equals(CurrentEntity.Schema, table.Schema, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(CurrentEntity.DatabaseName, table.Name, StringComparison.OrdinalIgnoreCase));
+
+    private bool IsSelectedProcedure(StoredProcedurePreview procedure) =>
+        string.Equals(CurrentEntity.Schema, procedure.Schema, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(CurrentEntity.DatabaseName, procedure.Name, StringComparison.OrdinalIgnoreCase);
+
+    private async Task SelectStoredProcedureAsync(StoredProcedurePreview procedure)
+    {
+        CurrentEntity.Kind = "StoredProcedure";
+        CurrentEntity.Schema = procedure.Schema;
+        CurrentEntity.DatabaseName = procedure.Name;
+        CurrentEntity.EntityName = procedure.EntityName;
+        CurrentEntity.Fields = [];
+        CurrentProjectId = await SaveDraftAsync($"Stored procedure selected: {procedure.Schema}.{procedure.Name}.");
+    }
+
+    private List<DatabaseColumnPreview> AvailableColumns =>
+        CurrentSelectedTable?.Columns
+            .Where(column => !CurrentEntity.Fields.Any(field => string.Equals(field.SourceName, column.Name, StringComparison.OrdinalIgnoreCase)))
+            .ToList() ?? [];
+
+    private List<DatabaseColumnPreview> SelectedColumns =>
+        CurrentSelectedTable?.Columns
+            .Where(column => CurrentEntity.Fields.Any(field => string.Equals(field.SourceName, column.Name, StringComparison.OrdinalIgnoreCase)))
+            .ToList() ?? [];
+
+    private bool IsSelectedTable(DatabaseTablePreview table) =>
+        string.Equals(CurrentEntity.Schema, table.Schema, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(CurrentEntity.DatabaseName, table.Name, StringComparison.OrdinalIgnoreCase);
+
+    private async Task SelectDatabaseTableAsync(DatabaseTablePreview table)
+    {
+        CurrentEntity.Kind = "Table";
+        CurrentEntity.Schema = table.Schema;
+        CurrentEntity.DatabaseName = table.Name;
+        CurrentEntity.EntityName = ToPascalCase(Singularize(table.Name));
+        CurrentEntity.Fields = table.Columns.Select(CreateFieldFromColumn).ToList();
+        CurrentProjectId = await SaveDraftAsync($"Database table selected: {table.Schema}.{table.Name}.");
+    }
+
+    private async Task AddColumnAsync(DatabaseColumnPreview column)
+    {
+        if (!CurrentEntity.Fields.Any(field => string.Equals(field.SourceName, column.Name, StringComparison.OrdinalIgnoreCase)))
+        {
+            CurrentEntity.Fields.Add(CreateFieldFromColumn(column));
+        }
+
+        CurrentProjectId = await SaveDraftAsync($"Database column selected: {column.Name}.");
+    }
+
+    private async Task RemoveColumnAsync(DatabaseColumnPreview column)
+    {
+        if (column.Role == "PK")
+        {
+            PlatformMessage = "ستون کلید اصلی از موجودیت حذف نمی‌شود.";
+            return;
+        }
+
+        CurrentEntity.Fields.RemoveAll(field => string.Equals(field.SourceName, column.Name, StringComparison.OrdinalIgnoreCase));
+        CurrentProjectId = await SaveDraftAsync($"Database column removed: {column.Name}.");
+    }
+
+    private async Task SelectAllColumnsAsync()
+    {
+        if (CurrentSelectedTable is not { } table)
+        {
+            return;
+        }
+
+        CurrentEntity.Fields = table.Columns.Select(CreateFieldFromColumn).ToList();
+        CurrentProjectId = await SaveDraftAsync($"All columns selected for table: {table.Name}.");
+    }
+
+    private async Task DeselectAllColumnsAsync()
+    {
+        if (CurrentSelectedTable is not { } table)
+        {
+            return;
+        }
+
+        CurrentEntity.Fields = table.Columns
+            .Where(column => column.Role == "PK")
+            .Select(CreateFieldFromColumn)
+            .ToList();
+        CurrentProjectId = await SaveDraftAsync($"Non-primary columns deselected for table: {table.Name}.");
+    }
+
+    private static FieldMappingDefinition CreateFieldFromColumn(DatabaseColumnPreview column) => new()
+    {
+        SourceName = column.Name,
+        PropertyName = ToPascalCase(column.Name),
+        DbType = column.Type,
+        ClrType = MapPostgresType(column.Type),
+        IsPrimaryKey = column.Role == "PK",
+        IsNullable = column.Role == "Optional",
+        IncludeInEntity = true
+    };
+
+    private RenderFragment ColumnRoleBadge(DatabaseColumnPreview column) =>
+        @<small class="mg-col-role @column.Role.ToLowerInvariant()">@column.Role</small>;
+
+    private static string MapPostgresType(string type) => type.ToLowerInvariant() switch
+    {
+        "uuid" => "Guid",
+        "int" or "integer" => "int",
+        "bigint" => "long",
+        "numeric" or "decimal" => "decimal",
+        "timestamp" or "timestamptz" or "date" => "DateTime",
+        "boolean" or "bool" => "bool",
+        _ => "string"
+    };
+
+    private static string Singularize(string value) =>
+        value.EndsWith("ies", StringComparison.OrdinalIgnoreCase)
+            ? $"{value[..^3]}y"
+            : value.EndsWith('s') && value.Length > 1 ? value[..^1] : value;
+
+    private static string ToPascalCase(string value)
+    {
+        var parts = value.Split(['_', '-', ' ', '.'], StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0)
+        {
+            return "GeneratedEntity";
+        }
+
+        return string.Concat(parts.Select(part =>
+            char.ToUpperInvariant(part[0]) + (part.Length > 1 ? part[1..] : string.Empty)));
+    }
+
+    private enum Screen
+    {
+        Dashboard,
+        Wizard,
+        Connectors,
+        Settings
+    }
+
+    private async Task<Guid?> SaveDraftAsync(string message)
+    {
+        try
+        {
+            var projectId = await WorkspaceStore.SaveDraftAsync(CurrentState, SelectedArchitecture);
+            await WorkspaceStore.AddGenerationLogAsync(projectId, "Information", message);
+            await LoadPlatformStateAsync();
+            return projectId;
+        }
+        catch
+        {
+            PlatformMessage = "ذخیره‌سازی در دیتابیس پلتفرم فعلاً در دسترس نیست؛ تغییرات در همین نشست نگهداری می‌شوند.";
+            return CurrentProjectId;
+        }
+    }
+
+    private static WizardStep StepToWizardStep(int step) => step switch
+    {
+        0 => WizardStep.ProjectDefinition,
+        1 => WizardStep.ProjectDefinition,
+        2 => WizardStep.DatabaseConnection,
+        3 => WizardStep.DataObjects,
+        4 => WizardStep.ExternalServices,
+        5 => WizardStep.ErrorDesigner,
+        6 => WizardStep.Generate,
+        _ => WizardStep.ProjectDefinition
+    };
+
+    private static string RelativeTime(DateTimeOffset updatedAt)
+    {
+        var elapsed = DateTimeOffset.UtcNow - updatedAt.ToUniversalTime();
+        if (elapsed.TotalMinutes < 2)
+        {
+            return "اکنون";
+        }
+
+        if (elapsed.TotalHours < 1)
+        {
+            return $"{(int)elapsed.TotalMinutes} دقیقه پیش";
+        }
+
+        if (elapsed.TotalDays < 1)
+        {
+            return $"{(int)elapsed.TotalHours} ساعت پیش";
+        }
+
+        return $"{(int)elapsed.TotalDays} روز پیش";
+    }
+
+    private sealed record ProjectCard(Guid Id, string Name, string Meta, string Icon, string Status);
+
+    private sealed record ConnectorDefinition(string Type, string Label, string Icon, string Description);
+
+    private sealed record AiBannerModel(string Title, string Text);
+
+    private sealed record DatabaseTablePreview(string Schema, string Name, IReadOnlyList<DatabaseColumnPreview> Columns);
+
+    private sealed record DatabaseColumnPreview(string Name, string Type, string Role);
+
+    private sealed record StoredProcedurePreview(string Schema, string Name, string EntityName, string ReturnType, string Description);
+}
